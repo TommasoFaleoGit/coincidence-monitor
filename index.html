@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SNSPD Coincidence Monitor</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #141b23;
+    --panel-2: #1b2430;
+    --border: #253140;
+    --text: #e6edf3;
+    --muted: #8b98a9;
+    --accent: #4cc9f0;
+    --ok: #3ddc84;
+    --warn: #ffb020;
+    --err: #ff5c5c;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    padding: 20px 32px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 12px;
+  }
+  header h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: 0.3px; }
+  .pulse {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    background: var(--muted); vertical-align: middle; margin-right: 8px;
+    transition: background 0.3s;
+  }
+  .pulse.live { background: var(--ok); animation: pulse 1.2s ease-in-out infinite; }
+  .pulse.stale { background: var(--warn); }
+  .pulse.error { background: var(--err); }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(61, 220, 132, 0.6); }
+    50% { box-shadow: 0 0 0 8px rgba(61, 220, 132, 0); }
+  }
+  .status-text { color: var(--muted); font-size: 13px; }
+
+  main { padding: 24px 32px 80px; max-width: 1400px; margin: 0 auto; }
+  #banner {
+    display: none; background: rgba(255, 176, 32, 0.12);
+    border: 1px solid var(--warn); color: var(--warn);
+    padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 14px;
+  }
+  #banner.error { background: rgba(255, 92, 92, 0.12); border-color: var(--err); color: var(--err); }
+  #banner.show { display: block; }
+
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px;
+       color: var(--muted); margin: 28px 0 12px; font-weight: 600; }
+  h2:first-of-type { margin-top: 0; }
+
+  .grid {
+    display: grid; gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 18px;
+    transition: border-color 0.4s;
+  }
+  .card.flash { border-color: var(--accent); }
+  .card .label { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .card .value {
+    font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums;
+    letter-spacing: -0.5px; font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+  .card .unit { font-size: 14px; color: var(--muted); margin-left: 4px; font-weight: 400; }
+  .card .sub {
+    font-size: 12px; color: var(--muted); margin-top: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  footer {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: var(--panel-2); border-top: 1px solid var(--border);
+    padding: 10px 32px; font-size: 12px; color: var(--muted);
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 12px; flex-wrap: wrap;
+  }
+  footer a { color: var(--accent); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+
+  .empty {
+    text-align: center; color: var(--muted); font-size: 14px;
+    padding: 40px 0;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">SNSPD Coincidence Monitor</h1>
+  <div><span id="pulse" class="pulse"></span><span id="status" class="status-text">connecting…</span></div>
+</header>
+
+<main>
+  <div id="banner"></div>
+
+  <section>
+    <h2>Single Channels</h2>
+    <div id="channels" class="grid"><div class="empty">waiting for data…</div></div>
+  </section>
+
+  <section>
+    <h2>Coincidences</h2>
+    <div id="coincidences" class="grid"><div class="empty">waiting for data…</div></div>
+  </section>
+</main>
+
+<footer>
+  <div id="last-updated">last update: —</div>
+  <div><a id="repo-link" href="#" target="_blank" rel="noopener">repository</a></div>
+</footer>
+
+<script>
+const REFRESH_INTERVAL = 10;   // seconds
+const STALE_THRESHOLD = 60;    // seconds
+
+let config = null;
+let lastPayload = null;        // previous data.json payload for rate estimation
+let lastFetchOk = 0;
+
+const $ = (id) => document.getElementById(id);
+
+function formatNumber(n) {
+  if (n === null || n === undefined || isNaN(n)) return "—";
+  if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(2) + "k";
+  if (Math.abs(n) >= 10) return n.toFixed(1);
+  return n.toFixed(3);
+}
+
+function displayName(map, key) {
+  return (map && map[key]) || key;
+}
+
+function renderGrid(container, data, prevData, nameMap) {
+  if (!data || Object.keys(data).length === 0) {
+    container.innerHTML = '<div class="empty">no data</div>';
+    return;
+  }
+  const prevCards = new Map();
+  container.querySelectorAll(".card").forEach(c => prevCards.set(c.dataset.key, c));
+
+  const frag = document.createDocumentFragment();
+  for (const [key, value] of Object.entries(data)) {
+    let card = prevCards.get(key);
+    if (!card) {
+      card = document.createElement("div");
+      card.className = "card";
+      card.dataset.key = key;
+      card.innerHTML = `
+        <div class="label"></div>
+        <div><span class="value"></span><span class="unit">cps</span></div>
+        <div class="sub"></div>`;
+    }
+    const prev = prevData ? prevData[key] : undefined;
+    card.querySelector(".label").textContent = displayName(nameMap, key);
+    card.querySelector(".value").textContent = formatNumber(value);
+
+    let subText = "";
+    if (typeof prev === "number" && typeof value === "number") {
+      const delta = value - prev;
+      const sign = delta >= 0 ? "+" : "";
+      subText = `Δ ${sign}${formatNumber(delta)} cps`;
+    }
+    card.querySelector(".sub").textContent = subText;
+
+    card.classList.add("flash");
+    setTimeout(() => card.classList.remove("flash"), 400);
+
+    frag.appendChild(card);
+  }
+  container.innerHTML = "";
+  container.appendChild(frag);
+}
+
+function setStatus(state, text) {
+  $("pulse").className = "pulse " + state;
+  $("status").textContent = text;
+}
+
+function showBanner(msg, kind) {
+  const b = $("banner");
+  b.textContent = msg;
+  b.className = "show" + (kind === "error" ? " error" : "");
+}
+function hideBanner() { $("banner").className = ""; }
+
+async function loadConfig() {
+  try {
+    const r = await fetch("config.json?t=" + Date.now(), { cache: "no-store" });
+    if (r.ok) config = await r.json();
+  } catch (_) { /* optional */ }
+  if (config && config.title) {
+    $("title").textContent = config.title;
+    document.title = config.title;
+  }
+}
+
+async function fetchData() {
+  try {
+    const r = await fetch("data.json?t=" + Date.now(), { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const payload = await r.json();
+
+    const nameChannels = (config && config.channels) || {};
+    const nameCoinc = (config && config.coincidences) || {};
+
+    renderGrid($("channels"), payload.channels || {},
+      lastPayload ? lastPayload.channels : null, nameChannels);
+    renderGrid($("coincidences"), payload.coincidences || {},
+      lastPayload ? lastPayload.coincidences : null, nameCoinc);
+
+    const ts = new Date(payload.timestamp);
+    const ageSec = (Date.now() - ts.getTime()) / 1000;
+    $("last-updated").textContent = "last update: " + ts.toLocaleString();
+
+    if (ageSec > STALE_THRESHOLD) {
+      setStatus("stale", `stale (${Math.round(ageSec)}s old)`);
+      showBanner(`Last update is ${Math.round(ageSec)} s old — the publisher may be offline.`, "warn");
+    } else {
+      setStatus("live", "live");
+      hideBanner();
+    }
+
+    lastPayload = payload;
+    lastFetchOk = Date.now();
+  } catch (e) {
+    setStatus("error", "fetch error");
+    showBanner("Failed to fetch data.json: " + e.message, "error");
+  }
+}
+
+function initRepoLink() {
+  const parts = location.pathname.split("/").filter(Boolean);
+  const host = location.hostname;
+  if (host.endsWith(".github.io") && parts.length >= 1) {
+    const user = host.split(".")[0];
+    const repo = parts[0];
+    $("repo-link").href = `https://github.com/${user}/${repo}`;
+  } else {
+    $("repo-link").style.display = "none";
+  }
+}
+
+(async function init() {
+  initRepoLink();
+  await loadConfig();
+  await fetchData();
+  setInterval(fetchData, REFRESH_INTERVAL * 1000);
+})();
+</script>
+</body>
+</html>
