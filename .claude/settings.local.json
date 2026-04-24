@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(ls -la \"/\\\\\\\\bigshare.uibk.ac.at/Photonik/Share/Users/Tommaso Faleo/Coding/Python Scripts/coincidence-monitor/\")",
-      "Bash(ls \"/\\\\\\\\bigshare.uibk.ac.at/Photonik/Share/Users/Tommaso Faleo/Coding/Python Scripts/coincidence-monitor/publisher/\")",
-      "Bash(cat \"/\\\\\\\\bigshare.uibk.ac.at/Photonik/Share/Users/Tommaso Faleo/Coding/Python Scripts/coincidence-monitor/.gitignore\")"
-    ]
-  }
-}
