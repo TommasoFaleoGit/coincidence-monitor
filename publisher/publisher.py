@@ -178,7 +178,7 @@ def main():
                 else:
                     coincidences = coinc.read() if coinc else {}
                     push_data(channels, coincidences)
-                    print(f"[{datetime.datetime.utcnow().isoformat()}Z] pushed "
+                    print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')}] pushed "
                           f"{len(channels)} channels, {len(coincidences)} coincidences")
             except Exception as e:
                 print(f"[warn] loop error: {e}")
