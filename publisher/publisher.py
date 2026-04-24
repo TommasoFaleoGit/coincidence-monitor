@@ -13,8 +13,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TOKEN = os.getenv("GITHUB_TOKEN")
-REPO = os.getenv("GITHUB_REPO")
 INTERVAL = int(os.getenv("UPDATE_INTERVAL", 10))
 
 ENABLE_COINCIDENCES = os.getenv("ENABLE_COINCIDENCES", "false").strip().lower() == "true"
@@ -22,15 +20,28 @@ COINCIDENCE_WINDOW_PS = int(os.getenv("COINCIDENCE_WINDOW_PS", 1000))
 
 DRIVERS_JSON = Path(__file__).parent / "drivers.json"
 
-if not TOKEN or not REPO:
-    sys.exit("GITHUB_TOKEN and GITHUB_REPO must be set in .env")
 
-API_BASE = f"https://api.github.com/repos/{REPO}/contents/data.json"
-HEADERS = {
-    "Authorization": f"Bearer {TOKEN}",
-    "Accept": "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2022-11-28",
-}
+def _target(token_var, repo_var):
+    token = os.getenv(token_var, "").strip()
+    repo = os.getenv(repo_var, "").strip()
+    if not token or not repo:
+        return None
+    return {
+        "label": repo,
+        "api_url": f"https://api.github.com/repos/{repo}/contents/data.json",
+        "headers": {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    }
+
+
+TARGETS = [t for t in (_target("GITHUB_TOKEN", "GITHUB_REPO"),
+                       _target("GITHUB_TOKEN_2", "GITHUB_REPO_2")) if t]
+
+if not TARGETS:
+    sys.exit("At least GITHUB_TOKEN and GITHUB_REPO must be set in .env")
 
 
 def load_driver_configs():
@@ -176,25 +187,29 @@ def push_data(channels, coincidences):
         "coincidences": coincidences,
     }
     body = json.dumps(payload, indent=2).encode("utf-8")
+    content_b64 = base64.b64encode(body).decode("ascii")
 
-    try:
-        r = requests.get(API_BASE, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        sha = r.json()["sha"]
-    except requests.RequestException as e:
-        print(f"[warn] GET failed: {e}")
-        return
+    for target in TARGETS:
+        try:
+            r = requests.get(target["api_url"], headers=target["headers"], timeout=15)
+            r.raise_for_status()
+            sha = r.json()["sha"]
+        except requests.RequestException as e:
+            print(f"[warn] GET failed [{target['label']}]: {e}")
+            continue
 
-    put_body = {
-        "message": "update counts",
-        "content": base64.b64encode(body).decode("ascii"),
-        "sha": sha,
-    }
-    try:
-        r = requests.put(API_BASE, headers=HEADERS, json=put_body, timeout=15)
-        r.raise_for_status()
-    except requests.RequestException as e:
-        print(f"[warn] PUT failed: {e} — {getattr(e.response, 'text', '')}")
+        put_body = {
+            "message": "update counts",
+            "content": content_b64,
+            "sha": sha,
+        }
+        try:
+            r = requests.put(target["api_url"], headers=target["headers"],
+                             json=put_body, timeout=15)
+            r.raise_for_status()
+        except requests.RequestException as e:
+            print(f"[warn] PUT failed [{target['label']}]: {e} — "
+                  f"{getattr(e.response, 'text', '')}")
 
 
 def build_sq_readers(driver_cfgs):
@@ -228,7 +243,8 @@ def main():
         mode = "dummy (all drivers offline)"
     if coinc:
         mode += "+Swabian"
-    print(f"Publisher started in {mode} mode — pushing every {INTERVAL}s to {REPO}")
+    repos = ", ".join(t["label"] for t in TARGETS)
+    print(f"Publisher started in {mode} mode — pushing every {INTERVAL}s to {repos}")
 
     try:
         while True:
