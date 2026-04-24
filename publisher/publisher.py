@@ -15,7 +15,12 @@ load_dotenv()
 TOKEN = os.getenv("GITHUB_TOKEN")
 REPO = os.getenv("GITHUB_REPO")
 INTERVAL = int(os.getenv("UPDATE_INTERVAL", 10))
-INTEGRATION_TIME_S = float(os.getenv("INTEGRATION_TIME", 5))
+
+SQ_IP = os.getenv("SQ_IP", "192.168.1.1")
+SQ_CONTROL_PORT = int(os.getenv("SQ_CONTROL_PORT", 12000))
+SQ_COUNTS_PORT = int(os.getenv("SQ_COUNTS_PORT", 12345))
+
+ENABLE_COINCIDENCES = os.getenv("ENABLE_COINCIDENCES", "false").strip().lower() == "true"
 COINCIDENCE_WINDOW_PS = int(os.getenv("COINCIDENCE_WINDOW_PS", 1000))
 
 if not TOKEN or not REPO:
@@ -28,26 +33,66 @@ HEADERS = {
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
-try:
-    from TimeTagger import (
-        createTimeTagger,
-        ChannelEdge,
-        Countrate,
-        Coincidences,
-        CoincidenceTimestamp,
-    )
-    HARDWARE = True
-except ImportError:
-    HARDWARE = False
-    print("TimeTagger SDK not found — running in dummy mode.")
 
+class SQReader:
+    """Read-only consumer of the Single Quantum WebSQ count stream.
 
-class Hardware:
+    Uses only non-mutating SDK calls: connect, get_number_of_detectors,
+    get_measurement_periode, acquire_cnts, close. Never enables detectors,
+    sets bias/trigger/period, or runs calibration — a running lab
+    measurement must remain undisturbed.
+    """
+
     def __init__(self):
+        from WebSQControl import WebSQControl
+        self.websq = WebSQControl(
+            TCP_IP_ADR=SQ_IP,
+            CONTROL_PORT=SQ_CONTROL_PORT,
+            COUNTS_PORT=SQ_COUNTS_PORT,
+        )
+        self.websq.connect()
+        self.n_detectors = self.websq.get_number_of_detectors()
+        self.period_ms = float(self.websq.get_measurement_periode())
+        if self.period_ms <= 0:
+            raise RuntimeError(f"Invalid SQ measurement period: {self.period_ms} ms")
+        print(f"SQ connected at {SQ_IP}: {self.n_detectors} detectors, period {self.period_ms} ms")
+
+    def read(self):
+        samples = self.websq.acquire_cnts(1)
+        if not samples:
+            return None
+        row = samples[-1]
+        counts = row[1:1 + self.n_detectors]
+        rate = 1000.0 / self.period_ms
+        return {f"ch{i + 1}": float(c) * rate for i, c in enumerate(counts)}
+
+    def close(self):
+        try:
+            self.websq.close()
+        except Exception:
+            pass
+
+
+class SwabianCoincidenceReader:
+    """Optional coincidence-only reader on the Swabian Time Tagger.
+
+    Creates virtual coincidence channels over all pairs of rising-edge
+    inputs and measures their rates. Does not reconfigure physical inputs.
+    Singles still come from SQ — this class never reports singles.
+    """
+
+    def __init__(self):
+        from TimeTagger import (
+            createTimeTagger,
+            ChannelEdge,
+            Countrate,
+            Coincidences,
+            CoincidenceTimestamp,
+        )
         self.tagger = createTimeTagger()
         self.channels = self.tagger.getChannelList(ChannelEdge.Rising)
-        if not self.channels:
-            raise RuntimeError("No rising-edge channels detected on the Time Tagger.")
+        if len(self.channels) < 2:
+            raise RuntimeError("Need at least 2 rising-edge channels for coincidences.")
         self.pairs = list(itertools.combinations(self.channels, 2))
         self.coinc = Coincidences(
             self.tagger,
@@ -55,36 +100,19 @@ class Hardware:
             COINCIDENCE_WINDOW_PS,
             CoincidenceTimestamp.Last,
         )
-        self.virtual_channels = self.coinc.getChannels()
-        self.singles = Countrate(self.tagger, self.channels)
-        self.coinc_rate = Countrate(self.tagger, self.virtual_channels)
+        self.rate = Countrate(self.tagger, self.coinc.getChannels())
+        print(f"Swabian coincidences: {len(self.pairs)} pairs, window {COINCIDENCE_WINDOW_PS} ps")
 
     def read(self):
-        integration_ps = int(INTEGRATION_TIME_S * 1e12)
-        for m in (self.singles, self.coinc_rate):
-            m.clear()
-            m.startFor(integration_ps)
-        self.singles.waitUntilFinished()
-        self.coinc_rate.waitUntilFinished()
-
-        single_rates = self.singles.getData()
-        coinc_rates = self.coinc_rate.getData()
-
-        channels = {f"ch{ch}": float(r) for ch, r in zip(self.channels, single_rates)}
-        coincidences = {
+        rates = self.rate.getData()
+        return {
             f"coincidences_ch{a}_ch{b}": float(r)
-            for (a, b), r in zip(self.pairs, coinc_rates)
+            for (a, b), r in zip(self.pairs, rates)
         }
-        return channels, coincidences
 
 
-def dummy_read():
-    channels = {f"ch{i}": random.uniform(1e4, 1e5) for i in range(1, 5)}
-    coincidences = {}
-    keys = list(channels.keys())
-    for a, b in itertools.combinations(keys, 2):
-        coincidences[f"coincidences_{a}_{b}"] = random.uniform(10, 500)
-    return channels, coincidences
+def dummy_singles():
+    return {f"ch{i}": random.uniform(1e4, 1e5) for i in range(1, 5)}
 
 
 def push_data(channels, coincidences):
@@ -115,19 +143,49 @@ def push_data(channels, coincidences):
         print(f"[warn] PUT failed: {e} — {getattr(e.response, 'text', '')}")
 
 
+def build_sq_reader():
+    try:
+        return SQReader()
+    except Exception as e:
+        print(f"[warn] SQ init failed ({e}) — falling back to dummy singles.")
+        return None
+
+
+def build_coinc_reader():
+    if not ENABLE_COINCIDENCES:
+        return None
+    try:
+        return SwabianCoincidenceReader()
+    except Exception as e:
+        print(f"[warn] Swabian coincidences disabled ({e}).")
+        return None
+
+
 def main():
-    reader = Hardware() if HARDWARE else None
-    mode = "hardware" if HARDWARE else "dummy"
+    sq = build_sq_reader()
+    coinc = build_coinc_reader()
+    mode = "SQ" if sq else "dummy"
+    if coinc:
+        mode += "+Swabian"
     print(f"Publisher started in {mode} mode — pushing every {INTERVAL}s to {REPO}")
-    while True:
-        try:
-            channels, coincidences = reader.read() if reader else dummy_read()
-            push_data(channels, coincidences)
-            print(f"[{datetime.datetime.utcnow().isoformat()}Z] pushed "
-                  f"{len(channels)} channels, {len(coincidences)} coincidences")
-        except Exception as e:
-            print(f"[warn] loop error: {e}")
-        time.sleep(INTERVAL)
+
+    try:
+        while True:
+            try:
+                channels = sq.read() if sq else dummy_singles()
+                if channels is None:
+                    print("[warn] no SQ sample available yet, skipping push")
+                else:
+                    coincidences = coinc.read() if coinc else {}
+                    push_data(channels, coincidences)
+                    print(f"[{datetime.datetime.utcnow().isoformat()}Z] pushed "
+                          f"{len(channels)} channels, {len(coincidences)} coincidences")
+            except Exception as e:
+                print(f"[warn] loop error: {e}")
+            time.sleep(INTERVAL)
+    finally:
+        if sq:
+            sq.close()
 
 
 if __name__ == "__main__":

@@ -109,22 +109,37 @@ HEADERS  = {
 }
 ```
 
-### Reading counts from the Time Tagger
+### Reading counts
 
-Add a function `read_counts()` that interfaces with your Time Tagger SDK and returns a
-dictionary like:
+**Default data source: Single Quantum WebSQ SDK (singles only).**
+The publisher must be strictly **read-only** toward the SQ hardware — it must
+never enable detectors, set bias currents, set trigger levels, set the
+measurement period, or run auto-bias calibration, because a running lab
+measurement must not be disturbed. Only these SDK calls are permitted:
+`connect`, `get_number_of_detectors`, `get_measurement_periode`,
+`acquire_cnts`, `close`.
+
+Each loop, call `acquire_cnts(1)` to pull the latest sample `[ts, ch1, …, chN]`
+and divide by the (cached) measurement period to convert raw counts → cps.
+
+**Optional: Swabian Time Tagger coincidences.** If `ENABLE_COINCIDENCES=true`,
+additionally instantiate `Coincidences` over all pairs of rising-edge
+channels with `COINCIDENCE_WINDOW_PS` and a `Countrate` on the virtual
+channels. Singles always come from SQ — the Swabian path contributes
+coincidences only.
+
+Published dictionary shape:
 
 ```python
 {
-  "ch1": 123456,
-  "ch2": 234567,
-  "coincidences_ch1_ch2": 789,
-  # add more channels / coincidence pairs as needed
+  "channels":    {"ch1": 123456.0, "ch2": 234567.0, ...},       # from SQ
+  "coincidences": {"coincidences_ch1_ch2": 789.0, ...}          # from Swabian; empty if disabled
 }
 ```
 
-This function should be the only part that needs customisation for your specific hardware.
-If the Time Tagger SDK is not available, fall back to dummy random data for testing.
+If the SQ SDK is unavailable or `connect()` fails, fall back to dummy random
+singles for testing. If the Swabian SDK is unavailable, continue with
+SQ-only.
 
 ### Pushing to GitHub
 

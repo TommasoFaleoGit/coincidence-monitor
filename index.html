@@ -108,7 +108,7 @@
     <div id="channels" class="grid"><div class="empty">waiting for data…</div></div>
   </section>
 
-  <section>
+  <section id="coincidences-section" style="display:none;">
     <h2>Coincidences</h2>
     <div id="coincidences" class="grid"><div class="empty">waiting for data…</div></div>
   </section>
@@ -216,8 +216,14 @@ async function fetchData() {
 
     renderGrid($("channels"), payload.channels || {},
       lastPayload ? lastPayload.channels : null, nameChannels);
-    renderGrid($("coincidences"), payload.coincidences || {},
-      lastPayload ? lastPayload.coincidences : null, nameCoinc);
+
+    const coincData = payload.coincidences || {};
+    const hasCoinc = Object.keys(coincData).length > 0;
+    $("coincidences-section").style.display = hasCoinc ? "" : "none";
+    if (hasCoinc) {
+      renderGrid($("coincidences"), coincData,
+        lastPayload ? lastPayload.coincidences : null, nameCoinc);
+    }
 
     const ts = new Date(payload.timestamp);
     const ageSec = (Date.now() - ts.getTime()) / 1000;
