@@ -60,12 +60,15 @@ def load_driver_configs():
         for key in ("ip", "control_port", "counts_port", "channel_map"):
             if key not in d:
                 sys.exit(f"drivers.json entry #{idx} missing field '{key}'")
-        cm = {int(k): int(v) for k, v in d["channel_map"].items()}
+        cm = {int(k): (int(v) if v is not None else None)
+              for k, v in d["channel_map"].items()}
         expected_keys = set(range(1, 9))
         if set(cm.keys()) != expected_keys:
             sys.exit(f"drivers.json entry #{idx} ({d['ip']}): channel_map "
                      f"must have exactly keys 1..8, got {sorted(cm.keys())}")
         for sq_ch, tt_id in cm.items():
+            if tt_id is None:
+                continue
             if tt_id in seen_tt_ids:
                 prev = seen_tt_ids[tt_id]
                 sys.exit(f"Duplicate TT channel {tt_id}: "
@@ -168,10 +171,12 @@ class SwabianCoincidenceReader:
 
 
 def dummy_singles(all_driver_cfgs):
-    """Random data for every TT channel id present in the driver configs."""
+    """Random data for every mapped (non-null) TT channel id in the driver configs."""
     out = {}
     for d in all_driver_cfgs:
         for tt_id in d["channel_map"].values():
+            if tt_id is None:
+                continue
             out[f"ch{tt_id}"] = random.uniform(1e4, 1e5)
     return out
 
