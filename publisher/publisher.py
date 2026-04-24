@@ -2,7 +2,7 @@ import os
 import json
 import time
 import base64
-import datetime
+from datetime import datetime, timezone
 import random
 import itertools
 import sys
@@ -117,7 +117,7 @@ def dummy_singles():
 
 def push_data(channels, coincidences):
     payload = {
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "channels": channels,
         "coincidences": coincidences,
     }

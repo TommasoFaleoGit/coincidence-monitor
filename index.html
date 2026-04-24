@@ -126,6 +126,7 @@ const STALE_THRESHOLD = 60;    // seconds
 let config = null;
 let lastPayload = null;        // previous data.json payload for rate estimation
 let lastFetchOk = 0;
+let dataUrl = "data.json";     // overridden on GitHub Pages to hit raw.githubusercontent.com
 
 const $ = (id) => document.getElementById(id);
 
@@ -207,7 +208,7 @@ async function loadConfig() {
 
 async function fetchData() {
   try {
-    const r = await fetch("data.json?t=" + Date.now(), { cache: "no-store" });
+    const r = await fetch(dataUrl + "?t=" + Date.now(), { cache: "no-store" });
     if (!r.ok) throw new Error("HTTP " + r.status);
     const payload = await r.json();
 
@@ -252,6 +253,9 @@ function initRepoLink() {
     const user = host.split(".")[0];
     const repo = parts[0];
     $("repo-link").href = `https://github.com/${user}/${repo}`;
+    // Fetch data.json straight from raw.githubusercontent.com so we don't
+    // wait for GitHub Pages to rebuild after each publisher commit.
+    dataUrl = `https://raw.githubusercontent.com/${user}/${repo}/main/data.json`;
   } else {
     $("repo-link").style.display = "none";
   }
