@@ -2,10 +2,11 @@ import os
 import json
 import time
 import base64
-from datetime import datetime, timezone
 import random
 import itertools
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -16,12 +17,10 @@ TOKEN = os.getenv("GITHUB_TOKEN")
 REPO = os.getenv("GITHUB_REPO")
 INTERVAL = int(os.getenv("UPDATE_INTERVAL", 10))
 
-SQ_IP = os.getenv("SQ_IP", "192.168.1.1")
-SQ_CONTROL_PORT = int(os.getenv("SQ_CONTROL_PORT", 12000))
-SQ_COUNTS_PORT = int(os.getenv("SQ_COUNTS_PORT", 12345))
-
 ENABLE_COINCIDENCES = os.getenv("ENABLE_COINCIDENCES", "false").strip().lower() == "true"
 COINCIDENCE_WINDOW_PS = int(os.getenv("COINCIDENCE_WINDOW_PS", 1000))
+
+DRIVERS_JSON = Path(__file__).parent / "drivers.json"
 
 if not TOKEN or not REPO:
     sys.exit("GITHUB_TOKEN and GITHUB_REPO must be set in .env")
@@ -34,8 +33,44 @@ HEADERS = {
 }
 
 
+def load_driver_configs():
+    """Load and validate drivers.json. Returns list of driver dicts with int channel_map."""
+    if not DRIVERS_JSON.exists():
+        sys.exit(f"Missing {DRIVERS_JSON}. Copy drivers.example.json and edit it.")
+    with open(DRIVERS_JSON, "r") as f:
+        raw = json.load(f)
+    drivers = raw.get("drivers", [])
+    if not drivers:
+        sys.exit("drivers.json contains no drivers.")
+
+    seen_tt_ids = {}
+    normalized = []
+    for idx, d in enumerate(drivers):
+        for key in ("ip", "control_port", "counts_port", "channel_map"):
+            if key not in d:
+                sys.exit(f"drivers.json entry #{idx} missing field '{key}'")
+        cm = {int(k): int(v) for k, v in d["channel_map"].items()}
+        expected_keys = set(range(1, 9))
+        if set(cm.keys()) != expected_keys:
+            sys.exit(f"drivers.json entry #{idx} ({d['ip']}): channel_map "
+                     f"must have exactly keys 1..8, got {sorted(cm.keys())}")
+        for sq_ch, tt_id in cm.items():
+            if tt_id in seen_tt_ids:
+                prev = seen_tt_ids[tt_id]
+                sys.exit(f"Duplicate TT channel {tt_id}: "
+                         f"{prev} and {d['ip']} ch{sq_ch}")
+            seen_tt_ids[tt_id] = f"{d['ip']} ch{sq_ch}"
+        normalized.append({
+            "ip": d["ip"],
+            "control_port": int(d["control_port"]),
+            "counts_port": int(d["counts_port"]),
+            "channel_map": cm,
+        })
+    return normalized
+
+
 class SQReader:
-    """Read-only consumer of the Single Quantum WebSQ count stream.
+    """Read-only consumer of one Single Quantum driver.
 
     Uses only non-mutating SDK calls: connect, get_number_of_detectors,
     get_measurement_periode, acquire_cnts, close. Never enables detectors,
@@ -43,28 +78,37 @@ class SQReader:
     measurement must remain undisturbed.
     """
 
-    def __init__(self):
+    def __init__(self, cfg):
         from WebSQControl import WebSQControl
+        self.ip = cfg["ip"]
+        self.channel_map = cfg["channel_map"]
         self.websq = WebSQControl(
-            TCP_IP_ADR=SQ_IP,
-            CONTROL_PORT=SQ_CONTROL_PORT,
-            COUNTS_PORT=SQ_COUNTS_PORT,
+            TCP_IP_ADR=cfg["ip"],
+            CONTROL_PORT=cfg["control_port"],
+            COUNTS_PORT=cfg["counts_port"],
         )
         self.websq.connect()
         self.n_detectors = self.websq.get_number_of_detectors()
         self.period_ms = float(self.websq.get_measurement_periode())
         if self.period_ms <= 0:
             raise RuntimeError(f"Invalid SQ measurement period: {self.period_ms} ms")
-        print(f"SQ connected at {SQ_IP}: {self.n_detectors} detectors, period {self.period_ms} ms")
+        print(f"SQ connected at {self.ip}: {self.n_detectors} detectors, "
+              f"period {self.period_ms} ms")
 
     def read(self):
         samples = self.websq.acquire_cnts(1)
         if not samples:
-            return None
+            return {}
         row = samples[-1]
         counts = row[1:1 + self.n_detectors]
         rate = 1000.0 / self.period_ms
-        return {f"ch{i + 1}": float(c) * rate for i, c in enumerate(counts)}
+        out = {}
+        for sq_ch_1based, c in enumerate(counts, start=1):
+            tt_id = self.channel_map.get(sq_ch_1based)
+            if tt_id is None:
+                continue
+            out[f"ch{tt_id}"] = float(c) * rate
+        return out
 
     def close(self):
         try:
@@ -101,7 +145,8 @@ class SwabianCoincidenceReader:
             CoincidenceTimestamp.Last,
         )
         self.rate = Countrate(self.tagger, self.coinc.getChannels())
-        print(f"Swabian coincidences: {len(self.pairs)} pairs, window {COINCIDENCE_WINDOW_PS} ps")
+        print(f"Swabian coincidences: {len(self.pairs)} pairs, "
+              f"window {COINCIDENCE_WINDOW_PS} ps")
 
     def read(self):
         rates = self.rate.getData()
@@ -111,13 +156,22 @@ class SwabianCoincidenceReader:
         }
 
 
-def dummy_singles():
-    return {f"ch{i}": random.uniform(1e4, 1e5) for i in range(1, 5)}
+def dummy_singles(all_driver_cfgs):
+    """Random data for every TT channel id present in the driver configs."""
+    out = {}
+    for d in all_driver_cfgs:
+        for tt_id in d["channel_map"].values():
+            out[f"ch{tt_id}"] = random.uniform(1e4, 1e5)
+    return out
+
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def push_data(channels, coincidences):
     payload = {
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "timestamp": utc_now_iso(),
         "channels": channels,
         "coincidences": coincidences,
     }
@@ -143,12 +197,14 @@ def push_data(channels, coincidences):
         print(f"[warn] PUT failed: {e} — {getattr(e.response, 'text', '')}")
 
 
-def build_sq_reader():
-    try:
-        return SQReader()
-    except Exception as e:
-        print(f"[warn] SQ init failed ({e}) — falling back to dummy singles.")
-        return None
+def build_sq_readers(driver_cfgs):
+    readers = []
+    for cfg in driver_cfgs:
+        try:
+            readers.append(SQReader(cfg))
+        except Exception as e:
+            print(f"[warn] SQ init failed for {cfg['ip']} ({e}).")
+    return readers
 
 
 def build_coinc_reader():
@@ -162,9 +218,14 @@ def build_coinc_reader():
 
 
 def main():
-    sq = build_sq_reader()
+    driver_cfgs = load_driver_configs()
+    readers = build_sq_readers(driver_cfgs)
     coinc = build_coinc_reader()
-    mode = "SQ" if sq else "dummy"
+
+    if readers:
+        mode = f"SQ ({len(readers)}/{len(driver_cfgs)} drivers)"
+    else:
+        mode = "dummy (all drivers offline)"
     if coinc:
         mode += "+Swabian"
     print(f"Publisher started in {mode} mode — pushing every {INTERVAL}s to {REPO}")
@@ -172,20 +233,29 @@ def main():
     try:
         while True:
             try:
-                channels = sq.read() if sq else dummy_singles()
-                if channels is None:
-                    print("[warn] no SQ sample available yet, skipping push")
+                channels = {}
+                if readers:
+                    for r in readers:
+                        try:
+                            channels.update(r.read())
+                        except Exception as e:
+                            print(f"[warn] read failed for {r.ip}: {e}")
+                else:
+                    channels = dummy_singles(driver_cfgs)
+
+                if not channels:
+                    print("[warn] no channel data this cycle, skipping push")
                 else:
                     coincidences = coinc.read() if coinc else {}
                     push_data(channels, coincidences)
-                    print(f"[{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')}] pushed "
+                    print(f"[{utc_now_iso()}] pushed "
                           f"{len(channels)} channels, {len(coincidences)} coincidences")
             except Exception as e:
                 print(f"[warn] loop error: {e}")
             time.sleep(INTERVAL)
     finally:
-        if sq:
-            sq.close()
+        for r in readers:
+            r.close()
 
 
 if __name__ == "__main__":

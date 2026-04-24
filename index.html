@@ -121,7 +121,7 @@
 
 <script>
 const REFRESH_INTERVAL = 10;   // seconds
-const STALE_THRESHOLD = 60;    // seconds
+const STALE_THRESHOLD = 360;   // seconds (tolerant of raw.githubusercontent.com CDN blips up to ~5 min)
 
 let config = null;
 let lastPayload = null;        // previous data.json payload for rate estimation
@@ -151,7 +151,16 @@ function renderGrid(container, data, prevData, nameMap) {
   container.querySelectorAll(".card").forEach(c => prevCards.set(c.dataset.key, c));
 
   const frag = document.createDocumentFragment();
-  for (const [key, value] of Object.entries(data)) {
+  const entries = Object.entries(data).sort((a, b) => {
+    // Sort numerically by the first channel number in the key (ch5 < ch10,
+    // coincidences_ch5_ch10 sorts by the 5).
+    const num = k => {
+      const m = k.match(/ch(-?\d+)/);
+      return m ? parseInt(m[1], 10) : 0;
+    };
+    return num(a[0]) - num(b[0]) || a[0].localeCompare(b[0]);
+  });
+  for (const [key, value] of entries) {
     let card = prevCards.get(key);
     if (!card) {
       card = document.createElement("div");

@@ -1,4 +1,5 @@
 .env
+publisher/drivers.json
 __pycache__/
 *.pyc
 .venv/

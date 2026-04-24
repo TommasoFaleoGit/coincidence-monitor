@@ -111,7 +111,18 @@ HEADERS  = {
 
 ### Reading counts
 
-**Default data source: Single Quantum WebSQ SDK (singles only).**
+**Default data source: Single Quantum WebSQ SDK — one or more drivers, singles only.**
+
+Driver layout is declared in `publisher/drivers.json` (gitignored; template at
+`publisher/drivers.example.json`). Each entry specifies a driver IP, control/counts
+ports, and a `channel_map` from the driver's internal channels `1..8` to
+Swabian Time Tagger channel IDs. The published `data.json` uses those TT IDs
+as keys (`ch<tt_id>`) so single-channel labels stay consistent with the
+Swabian coincidence labels and survive rewiring at the driver level.
+
+Validation at startup: every `channel_map` must have exactly keys `1..8`,
+and no TT ID may appear in more than one driver's map.
+
 The publisher must be strictly **read-only** toward the SQ hardware — it must
 never enable detectors, set bias currents, set trigger levels, set the
 measurement period, or run auto-bias calibration, because a running lab
